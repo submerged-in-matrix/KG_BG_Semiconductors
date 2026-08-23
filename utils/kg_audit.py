@@ -11,7 +11,8 @@ This is what ex:hasSourceId was made mandatory for: every material carries
 its origin, so the graph can be audited and selectively rolled back.
 """
 
-from env.modules import *
+import pandas as pd
+from rdflib import RDF
 from ontology.core import g, EX, Material
 
 hasSourceId = EX.hasSourceId

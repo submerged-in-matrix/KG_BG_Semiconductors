@@ -21,6 +21,7 @@
 # Generated KG-related names
 kg_full/
 mse_kg_full.ttl
+mse_kg_full.ttl.bak
 mse_kg_full.nt
 full_dataset_*
 semiconductors_small*
