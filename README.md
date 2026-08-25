@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🔬 Semantic Models for Materials Science & Engineering
+# 🔬 Semantic Query of Bandgap
 
 **A Neuro-Symbolic Pipeline: Fine-Tuned LLM + RDF Knowledge Graph for Semiconductor Band-Gap Data**
 
@@ -8,6 +8,9 @@
 [![Python](https://img.shields.io/badge/Python-96.5%25-3776AB?logo=python&logoColor=white)](.)
 [![LLM](https://img.shields.io/badge/LLM-Llama_3.2_3B_(LoRA)-orange)](.)
 [![RDF](https://img.shields.io/badge/Linked_Data-RDF%2FSPARQL-blue)](.)
+[![Live Demo](https://img.shields.io/badge/🤗_Live_Demo-HF_Space-yellow)](https://huggingface.co/spaces/brainteaser/semantic-bg-query-semiconductor)
+
+**[▶ Try the live demo](https://huggingface.co/spaces/brainteaser/semantic-bg-query-semiconductor)**
 
 </div>
 
@@ -15,47 +18,51 @@
 
 ## The Problem
 
-Materials science data is fragmented. Band-gap values sit in CSVs, crystal structures in CIF files, composition metadata in API responses, and literature findings in PDFs — each with its own schema, naming conventions, and units. A single queryable source of truth, where one can ask *"Give me all cubic, centrosymmetric materials with a band gap between 1.0 and 2.0 eV"* and receive a provenance-tracked answer spanning structured databases and unstructured text, matters for reproducibility and automation in data-driven materials research.
+Materials screening is rarely blocked by a single missing number. It is blocked by **constraints that live in different formats**.
 
-This project is a working prototype of that idea.
+Take a concrete task: find a candidate crystal for **ultraviolet frequency doubling**. Physics hands you two hard filters before any calculation:
+
+- The crystal **must be non-centrosymmetric** — even-order nonlinear optical response vanishes identically in centrosymmetric crystals. This is a selection rule, not a tendency.
+- The gap **must be wide** — transparency and damage threshold at short wavelengths.
+
+Symmetry comes from the crystal structure. The gap comes from an electronic-structure calculation. Composition comes from a formula string. Each sits in its own file with its own schema, so answering both at once means cross-referencing by hand.
+
+In this graph it is one question — *"non-centrosymmetric materials with band gap above 2.5 eV"* — returning **9,429 candidates out of 150,987**, with provenance attached.
+
+That is the argument for a knowledge graph here: not that any individual value is hard to get, but that **multi-constraint, symmetry-aware screening becomes a single query** instead of a data-wrangling exercise.
 
 ## What This Does
 
-A neuro-symbolic pipeline combining a **hand-designed RDF ontology** with 2 **fine-tuned local LLMs** (Llama 3.2 3B, LoRA) for ingestion (parse_Lora) and querying (query_lora) of semiconductor band-gap data. The knowledge graph currently holds **~150,000 materials** (~999k triples) sourced from Materials Project via `mp-api`, featurized with `matminer`.
+A neuro-symbolic pipeline combining a **hand-designed RDF ontology** with **two fine-tuned local LLMs** (Llama 3.2 3B, LoRA) — one for ingestion (`parse-lora`), one for querying (`query-lora`). The graph holds **150,987 materials** (**1.36M triples**) from Materials Project via `mp-api`, featurized with `matminer`.
 
 ### Mode 1 — LLM-Assisted Ingestion
-
-Feed raw text — a URL, a paragraph from a pdf, or a random text — and the fine-tuned extraction model (`parse-lora`) pulls material entities, deduplicates against the existing graph, normalizes types, and produces clean RDF triples.
 
 ```
 Raw Text / URL  →  LLM extraction  →  Deduplication & Sanitization  →  Typed RDF Triples  →  KG
 ```
 
-> **Note:** PDF/image file ingestion is not yet implemented . Only plain text and URL (HTML via `requests` + `BeautifulSoup`) are currently supported.
+> **Note:** PDF/image ingestion is not implemented. Plain text and URL (HTML via `requests` + `BeautifulSoup`) only.
 
 ### Mode 2 — Natural Language Querying
-
-Ask a question in plain English. The fine-tuned query model (`query-lora`) translates it into SPARQL, a deterministic sanitizer validates and repairs the output, and the query runs against the in-memory triplestore.
 
 ```
 "Which cubic materials have band gaps above 1.5 eV?"  →  query-lora  →  sanitize_sparql  →  rdflib  →  Results
 ```
 
-### Live API
+### Deployment
 
-The query interface is served via FastAPI. My local machine is tunneled via Tailscale for inference of LLM.
+| Interface | What | Latency |
+|---|---|---|
+| **[HF Space](https://huggingface.co/spaces/brainteaser/semantic-bg-query-semiconductor)** | Gradio, ZeroGPU, public | ~10–30 s end-to-end |
+| FastAPI (`POST /ask`) | Local, Tailscale-tunnelled | CPU-bound |
+| FastAPI (`GET /material`) | Direct rdflib index lookup, no LLM | instant |
 
-- **NL query:** `POST /ask` — LLM-generated SPARQL, ~2 min on CPU
-- **Formula lookup:** `GET /material?formula=GaAs` — direct rdflib index lookup, no LLM, instant
-
-The extraction model (`parse-lora`) is not exposed — ingestion is restricted to the author and contributors.
-
-For a scheduled demo: **sayeed.shahriar@gmail.com**
+`parse-lora` is **not exposed publicly** — ingestion writes to the graph and stays author-gated.
 
 ## The Ontology
 
 ```
-                    ┌─── hasBandGap ──────→  xsd:float (eV)
+                    ┌─── hasBandGap ──────→  xsd:float (eV, DFT-computed)
                     │
                     ├─── hasCrystalSystem ─→  xsd:string
                     │
@@ -66,18 +73,34 @@ For a scheduled demo: **sayeed.shahriar@gmail.com**
                     └─── hasSourceId ──────→  xsd:string (provenance)
 ```
 
-Deliberately minimal — a clean, extensible foundation. Every triple carries provenance metadata tracing facts back to their origin (Materials Project API, featurized CSV, or LLM-extracted text).
+Deliberately minimal — a clean, extensible foundation. Every material carries mandatory provenance, so any subset can be audited or rolled back without rebuilding.
+
+**Node identity is `material_id`, not formula.** This matters: 150,987 materials span only 102,417 distinct formulas, because one composition crystallises into structurally distinct phases. An earlier version keyed nodes on formula and silently merged them — see [Data Integrity](#data-integrity).
 
 ## Fine-Tuning
 
-Both LLM capabilities were fine-tuned via LoRA on `unsloth/Llama-3.2-3B-Instruct` (4-bit QLoRA, r=16, `train_on_responses_only` loss masking). Training data was built from verified templates, not generated by another LLM — SPARQL correctness is checkable, so ground truth came from the templates directly.
+Both adapters were fine-tuned via LoRA on `unsloth/Llama-3.2-3B-Instruct` (4-bit QLoRA, r=16, `train_on_responses_only` loss masking). Training data was built from **verified templates, not generated by another LLM** — SPARQL correctness is mechanically checkable, so ground truth came from templates directly.
 
-| Adapter | Task | Training examples | Final loss | Eval |
-|---|---|---|---|---|
-| `query-lora` | NL → SPARQL | 122 (expanded to 206 after fix) | 0.075 | 13/13 parse-valid |
-| `parse-lora` | Text → JSON extraction | 76 (expanded to 148 after fix) | — | 21/21 valid JSON, 11/11 rejections correct |
+| Adapter | Task | Examples | Validation |
+|---|---|---|---|
+| `query-lora` v2 | NL → SPARQL | 234 (210 train / 24 eval) | all 234 targets parse as valid SPARQL; correct output on held-out element pairs |
+| `parse-lora` | Text → JSON extraction | 148 | 21/21 valid JSON, 11/11 rejection cases correct |
 
-Both runs required one iteration to fix data-thinness failures — underrepresented subcategories were the root cause in each case, not model capacity. Details in [`data/finetune/`](data/finetune/).
+**On evaluation methodology.** Eval loss on a fully templated dataset measures template-fitting, not capability — the v2 run scored 0.0001 and that number is not meaningful evidence. What *is* meaningful: the element pair `Bi`+`Te`, absent from all 97 two-element combinations in training, still produced correct `CONTAINS` filters. That is generalization to unseen combinations, tested explicitly rather than inferred from a loss curve.
+
+Both adapters required one iteration to fix data-thinness failures — underrepresented subcategories, not model capacity, in each case.
+
+## Data Integrity
+
+Several defects were found and fixed by systematic auditing rather than by noticing bad output. Each has a diagnostic script in [`maintenance/`](maintenance/).
+
+**Identity-key defect.** Nodes were keyed on chemical formula, which is not unique — 20,721 formulas map to multiple `material_id` values. This silently collapsed ~48,569 rows onto other rows' nodes. Because `hasCrystalSystem` was write-guarded but `hasBandGap` was not, merged nodes kept **one** crystal system while accumulating **every** band gap — one node carried 406 values against a single structure label. Fixed by moving identity to `material_id` and rebuilding.
+
+**Pandas NA collision.** `NaN` is a real chemical formula (sodium nitride) and also sits in pandas' default missing-value list. Plain `pd.read_csv` silently blanked those materials at every pipeline stage. Fixed centrally in `utils/csv_io.py` by removing that one token from the NA list — verified against the `structure` column, which shows Na:N 1:1.
+
+**Spreadsheet type corruption.** Excel had retyped formula cells like `FeB2` and `FeBr3` into datetime objects *at rest*. Traced across all three pipeline stages to establish the clean source, then patched.
+
+**Query latency.** Benchmarking isolated `ORDER BY` as the dominant cost — **63.88 s with it, 0.06 s without**, same query. rdflib must materialise and sort every match before `LIMIT` applies. Sorting is now opt-in rather than an always-on default.
 
 ## Architecture
 
@@ -86,78 +109,62 @@ Both runs required one iteration to fix data-thinness failures — underrepresen
 │                        DATA SOURCES                          │
 │  Materials Project API  ·  CSVs  ·  Raw text/URLs            │
 └──────────────┬───────────────────────────────────────────────┘
-               │
                ▼
     ┌─────────────────────┐        ┌───────────────────────┐
     │   Structured Ingest │        │   LLM-Assisted Ingest │
-    │   (parse/)          │        │   (llm/ + parse/)     │
-    │                     │        │                       │
-    │  CSV → Pymatgen     │        │  NL text → parse-lora │
-    │  Structure Object   │        │  → entity extraction   │
-    │  → typed RDF        │        │  → dedup & sanitize    │
-    │  triples            │        │  → typed RDF triples   │
+    │   CSV → Pymatgen    │        │   NL text → parse-lora│
+    │   → typed RDF       │        │   → dedup & sanitize  │
     └────────┬────────────┘        └───────────┬───────────┘
-             │                                 │
              └────────────┬────────────────────┘
                           ▼
               ┌───────────────────────┐
               │   RDF Knowledge Graph │
-              │   (kg/)               │
-              │                       │
-              │   rdflib · ~999k      │
-              │   triples · ~150k     │
-              │   materials           │
-              │   + provenance        │
+              │   rdflib · 1.36M      │
+              │   triples · 150,987   │
+              │   materials + prov.   │
               └───────────┬───────────┘
-                          │
                 ┌─────────┴──────────┐
                 ▼                    ▼
     ┌────────────────────┐  ┌────────────────────┐
     │  NL Query          │  │  Direct Lookup     │
-    │  (query/)          │  │  (query/)          │
-    │                    │  │                    │
     │  NL → query-lora   │  │  formula → rdflib  │
     │  → sanitize_sparql │  │  index lookup      │
-    │  → rdflib execute  │  │  (~0.05 ms)        │
+    │  → rdflib execute  │  │  (~0.1 ms)         │
     └────────────────────┘  └────────────────────┘
-                │                    │
                 └────────┬───────────┘
                          ▼
-              ┌───────────────────────┐
-              │  FastAPI + Tailscale  │
-              │  /ask    /material    │
-              │  /docs (Swagger UI)   │
-              └───────────────────────┘
+         ┌───────────────────────────────┐
+         │  HF Space (Gradio, ZeroGPU)   │
+         │  FastAPI (/ask, /material)    │
+         └───────────────────────────────┘
 ```
 
 ## Key Design Decisions
 
-**Local 3B model, not GPT-4.** Llama 3.2 (3B) via Ollama — no API costs, no data leaving the machine, reproducible results. Fine-tuning a small model on domain-specific templates proved sufficient for a constrained ontology.
+**Local 3B model, not GPT-4.** No API costs, no data leaving the machine, reproducible results. Fine-tuning a small model on domain-specific templates proved sufficient for a constrained ontology.
 
-**RDF, not Neo4j.** RDF triples compose with existing materials ontologies (MatOnto, EMMO, ChEBI), support federated SPARQL across institutions, and enforce schema constraints via domain/range validation.
+**RDF, not Neo4j.** RDF composes with existing materials ontologies (MatOnto, EMMO, ChEBI), supports federated SPARQL across institutions, and enforces schema constraints via domain/range declarations.
 
-**Provenance as a first-class property.** When three sources disagree on a band gap value, the graph records which came from DFT calculations, which from experiment, and which from LLM-extracted text.
+**Provenance as a first-class property.** Mandatory `hasSourceId` on every material, enabling source-scoped audit and rollback.
 
-**Deterministic sanitizer over raw LLM output.** The fine-tuned model proposes SPARQL; a rule-based sanitizer (`sanitize_sparql`) validates, repairs parentheses, strips deprecated predicates, and enforces the ontology schema before execution. Known failure modes (e.g., mis-nested parentheses in combined filters) are deterministically corrected — the model's imperfections are understood and mitigated, not hidden.
+**Deterministic sanitizer over raw LLM output.** The model proposes SPARQL; a rule-based layer validates, repairs parentheses, strips deprecated predicates, and enforces schema before execution. Known failure modes are corrected deterministically — the model's imperfections are understood and mitigated, not hidden.
+
+**Fold results by composition, and say so.** Because current descriptors cannot distinguish every phase, results report one representative per composition alongside `n_total` and `n_phases` — the limitation is surfaced in the output rather than buried.
 
 ## Repository Structure
 
 ```
-Semantic_models_for-MSE/
+KG_BG_Semiconductors/
 ├── ontology/          # RDF schema definition
 ├── kg/                # KG construction & serialization
-├── llm/               # LLM integration — extraction + NL→SPARQL
+├── llm/               # LLM integration — extraction + graph writes
 ├── parse/             # CSV → Pymatgen → RDF; text parsing
 ├── query/             # SPARQL execution, formula lookup, guardrails
-├── data/              # Source data + fine-tuning artifacts
-│   └── finetune/      # LoRA adapters, training scripts, eval logs
+├── maintenance/       # Audit, validation, remediation, phase analysis
+├── data/finetune/     # LoRA adapters, training scripts, eval logs
 ├── demos/             # End-to-end demos — start here
-├── examples/          # Example queries and ingestion runs
-├── notebooks/         # Jupyter notebooks
-├── utils/             # Sanitizer, KG audit, provenance tools
-├── env/               # Environment config
-├── export/            # KG export utilities
-└── api_server.py      # FastAPI wrapper (POST /ask, GET /material)
+├── utils/             # Sanitizer, KG audit, safe CSV I/O
+└── api_server.py      # FastAPI wrapper
 ```
 
 ## Tech Stack
@@ -165,26 +172,31 @@ Semantic_models_for-MSE/
 | Component | Technology |
 |---|---|
 | **Knowledge Graph** | `rdflib` — RDF triples, SPARQL execution |
-| **LLM** | Llama 3.2 3B, LoRA fine-tuned, served via Ollama |
+| **LLM** | Llama 3.2 3B, LoRA fine-tuned (Ollama locally, transformers+PEFT on HF) |
 | **Fine-tuning** | Unsloth + PEFT + TRL (QLoRA, 4-bit) |
 | **Quantization** | llama.cpp, imatrix-calibrated Q4_K_M |
-| **API** | FastAPI + Uvicorn, tunneled via Tailscale Funnel |
-| **Data source** | Materials Project (`mp-api`) + `matminer` featurization |
-| **Parsing** | Regex + Pymatgen for crystal structures |
+| **Structure analysis** | `pymatgen` (`StructureMatcher`), `matminer` |
+| **Deployment** | HF Spaces (Gradio, ZeroGPU) · FastAPI + Tailscale |
+| **Data source** | Materials Project (`mp-api`) |
 
 ## Known Limitations
 
-- **NL queries take ~2.5 min on CPU.** No GPU in the serving setup; inference runs on CPU only.
-- **The model understands "materials," not "semiconductors."** Training templates used "materials" consistently; synonyms like "semiconductor" may produce invalid SPARQL. Use "materials" in queries.
-- **API availability depends on the author's machine being online.** This is a personal project served from a local machine, not a production deployment.
+- **DFT band gaps, not measurements.** Semi-local functionals underestimate gaps by 30–50%. GaAs appears at 0.19 eV against an experimental ~1.42 eV. Rankings are more reliable than absolute values.
+- **No direct/indirect gap, stability, or transport properties** — not in the original extraction. See planned extensions.
+- **Crystal system + centrosymmetry under-determine phase** for 28.8% of multi-entry compositions.
+- **Use "materials", not "semiconductors"** — training templates used that term consistently.
+- **Idealised crystals only** — defect-free, ground-state, no doping or disorder.
 
 ## Planned Extensions
 
-| Domain | Status |
+| Item | Status |
 |---|---|
-| Common Semiconductors | ✅ Current |
+| Second MP extraction (`is_gap_direct`, `energy_above_hull`, space group) | 🔜 Planned — see [`maintenance/extension_workflow.md`](maintenance/extension_workflow.md) |
+| Explicit phase representation in the ontology | 🔜 Planned |
 | Metal-Organic Frameworks (MOFs) | 🔜 Planned |
 | Alloys | 🔜 Planned |
+
+Each property adds ~150k triples. Graph size under free-tier hosting, not effort, is the binding constraint.
 
 ## Related Work
 
@@ -199,6 +211,6 @@ Semantic_models_for-MSE/
 
 <div align="center">
 
-📬 sayeed.shahriar@gmail.com · [Portfolio](https://submerged-in-matrix.github.io/projects/semantic-models/) · [GitHub](https://github.com/submerged-in-matrix)
+📬 sayeed.shahriar@gmail.com · [Portfolio](https://submerged-in-matrix.github.io/projects/semantic-models/) · [GitHub](https://github.com/submerged-in-matrix) · [🤗 Live Demo](https://huggingface.co/spaces/brainteaser/semantic-bg-query-semiconductor)
 
 </div>
