@@ -1,12 +1,4 @@
 """
-phase_match.py — Definitive phase grouping via pymatgen StructureMatcher.
-
-This supersedes the volume/atom approximation in polymorphism_tolerance.py.
-That approximation existed because of an assumption -- "pymatgen is
-unavailable due to the matminer/pandas conflict" -- that was never tested.
-matminer 0.9.3 requires pandas<3; pymatgen is a SEPARATE package and may
-import fine. This script checks that first and says so plainly.
-
 WHY StructureMatcher IS THE RIGHT TOOL
   It reduces both structures to primitive cells, aligns lattices, and
   matches sites within tolerances. That makes it invariant to the three
@@ -28,8 +20,7 @@ WHY IT NEEDS PRE-BUCKETING
 
   The vol/atom bucket tolerance is deliberately loose (default 25%) --
   far wider than any relaxation difference -- so it cannot separate
-  structures StructureMatcher would have matched. Widen it with
-  --bucket-tol if you want to be more conservative still.
+  structures StructureMatcher would have matched. Widen it makes it  more conservative output.
 
 USAGE
     python -m maintenance.phase_match --check        # just test imports
