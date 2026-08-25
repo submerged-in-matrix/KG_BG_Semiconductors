@@ -2,12 +2,16 @@ from env.modules import *
 from llm.ingest_from_txt import ingest_normalized_row
 from llm.normalize import RowOut
 from ontology.core import g
+from utils.csv_io import read_csv_safe
 
 def _norm_str(x):
     return str(x).strip() if pd.notna(x) and str(x).strip() not in {"", "nan", "None"} else None
 
 def ingest_new_csv(csv_path: str, update_df: bool = False):
-    new_df = pd.read_csv(csv_path)
+    # read_csv_safe, not pd.read_csv: 'NaN' is a real formula in this
+    # domain (sodium nitride) and pandas' default NA handling would eat
+    # it. See utils/csv_io.py.
+    new_df = read_csv_safe(csv_path)
 
     # align columns 
     rename_map = {

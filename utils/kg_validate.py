@@ -21,6 +21,20 @@ Classification per failure:
                   provenance inconsistency, needs manual review, never
                   auto-deleted
 
+CHANGED (this version):
+  1. CSV reads now go through utils.csv_io.read_csv_safe. Plain
+     pd.read_csv turns the literal formula 'NaN' (sodium nitride) into a
+     missing value, which made this validator report 3 real materials as
+     unrecoverable gaps. See utils/csv_io.py for the full explanation.
+  2. Note on identity: with material_id as the KG's identity key, every
+     material node carries exactly one hasExternalId, so 'unverifiable'
+     now means a genuinely unmatched id rather than an artifact of
+     several source rows having been merged onto one node. Expect the
+     failure counts here to CHANGE after the identity-key rebuild —
+     defects that were previously hidden behind merged nodes become
+     individually visible. That is the validator working, not a
+     regression.
+
 Read-only: this script never writes to `g`. It only reads the graph and
 the CSVs, and writes a report to maintenance/. Remediation is a separate
 step (kg_remediate.py).
@@ -33,6 +47,7 @@ import pandas as pd
 
 from ontology.core import g, EX
 from utils.kg_audit import material_subjects, source_of
+from utils.csv_io import read_csv_safe
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -53,6 +68,7 @@ hasCentrosymmetric = EX.hasCentrosymmetric
 # Ga2O3N5Cl7, optionally with ONE level of parenthesized polyatomic groups
 # and a trailing multiplier: MgCr2(SiO4)3, K3Ba2Pr2(BiO5)3. Dates, empty
 # strings, and anything with '-', ':', whitespace still fail this.
+# Note: 'NaN' (sodium nitride) correctly matches as Na + N.
 _ELEMENT = r"[A-Z][a-z]?\d*"
 _GROUP = r"\((?:[A-Z][a-z]?\d*)+\)\d*"
 FORMULA_RE = re.compile(rf"^(?:{_ELEMENT}|{_GROUP})+$")
@@ -132,6 +148,7 @@ def scan_invalid(materials=None) -> pd.DataFrame:
                     "graph_value": v,
                     "reason":      reason,
                     "source_id":   source_of(m),
+                    "n_values":    len(vals),   # >1 signals a merge artifact
                 })
     return pd.DataFrame(rows)
 
@@ -139,11 +156,11 @@ def scan_invalid(materials=None) -> pd.DataFrame:
 # ─── CSV cross-check ─────────────────────────────────────────────────────
 
 def load_base_csv(path: Path = BASE_CSV) -> pd.DataFrame:
-    return pd.read_csv(path, dtype={"material_id": str, "formula": str})
+    return read_csv_safe(path, dtype={"material_id": str, "formula": str})
 
 
 def load_master_csv(path: Path = MASTER_CSV) -> pd.DataFrame:
-    return pd.read_csv(path, dtype={"material_id": str, "formula": str})
+    return read_csv_safe(path, dtype={"material_id": str, "formula": str})
 
 
 def classify(invalid_df: pd.DataFrame,
@@ -195,26 +212,67 @@ def classify(invalid_df: pd.DataFrame,
 
 # ─── Entry point ─────────────────────────────────────────────────────────
 
+def _dated_report_path() -> Path:
+    """
+    maintenance/validation_report_YYYYMMDD_HHMMSS.csv — every run writes
+    its own file. This is a maintenance script whose consumer
+    (kg_remediate.py) acts destructively on whatever report it's pointed
+    at; a stale, silently-unwritten file on disk was previously
+    indistinguishable from a fresh 'nothing to report' run (see: the
+    remediate run that acted on yesterday's report against dead
+    formula-slug IRIs after the material_id rebuild). A dated filename
+    makes "which run produced this" unambiguous without relying on
+    remembering to check a timestamp.
+    """
+    from datetime import datetime
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return MAINTENANCE_DIR / f"validation_report_{stamp}.csv"
+
+
 def run(report_path: Path = None) -> pd.DataFrame:
     invalid = scan_invalid()
     n_materials = invalid["iri"].nunique() if not invalid.empty else 0
     print(f"Found {len(invalid)} field-level failure(s) across {n_materials} material(s).")
 
+    if report_path is None:
+        report_path = _dated_report_path()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+
     if invalid.empty:
         print("Graph is semantically clean — nothing to report.")
+        # Write anyway: an empty, dated file is proof this run happened
+        # and found nothing, rather than a report simply not existing
+        # (which is indistinguishable from "this script was never run").
+        pd.DataFrame(columns=["iri", "external_id", "field", "graph_value",
+                              "reason", "source_id", "csv_value",
+                              "classification"]).to_csv(report_path, index=False)
+        print(f"Empty report saved (proof of a clean run): {report_path}")
+        _update_latest_pointer(report_path)
         return invalid
 
     classified = classify(invalid)
     print("\nBy classification:")
     print(classified["classification"].value_counts().to_string())
 
-    if report_path is None:
-        report_path = DEFAULT_REPORT
-    report_path.parent.mkdir(parents=True, exist_ok=True)
     classified.to_csv(report_path, index=False)
     print(f"\nReport saved: {report_path}")
     print("Nothing in the graph was modified — run kg_remediate.py to act on this report.")
+    _update_latest_pointer(report_path)
     return classified
+
+
+def _update_latest_pointer(report_path: Path):
+    """
+    validation_report_latest.csv — a copy of (not a symlink to) the most
+    recent dated report, so kg_remediate.py's default path keeps working
+    without the caller having to know today's timestamp. Always a copy:
+    a stale copy left behind by a crashed run is easy to spot (its
+    contents won't match the newest dated file); a broken symlink is not.
+    """
+    import shutil
+    latest = MAINTENANCE_DIR / "validation_report_latest.csv"
+    shutil.copy2(report_path, latest)
+    print(f"Latest pointer updated: {latest}")
 
 
 if __name__ == "__main__":

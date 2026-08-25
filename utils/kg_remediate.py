@@ -18,6 +18,13 @@ to actually modify the graph and persist it:
 
 On --commit, the current mse_kg_full.ttl is backed up to .ttl.bak BEFORE
 any write, and a remediation log is saved to maintenance/ for audit trail.
+
+CHANGED (this version): the report read goes through
+utils.csv_io.read_csv_safe. The report's csv_value column can legitimately
+contain the string 'NaN' (sodium nitride) — plain pd.read_csv would turn
+that ground-truth value into a missing value and this script would then
+write an empty formula into the graph while logging it as a successful
+patch. See utils/csv_io.py.
 """
 
 import shutil
@@ -28,10 +35,13 @@ import pandas as pd
 from rdflib import Literal, URIRef, XSD
 
 from ontology.core import g, EX
+from utils.csv_io import read_csv_safe
 
 ROOT = Path(__file__).resolve().parent.parent
 MAINTENANCE_DIR = ROOT / "maintenance"
-DEFAULT_REPORT = MAINTENANCE_DIR / "validation_report.csv"
+# kg_validate.py now writes a fresh, dated file every run and updates this
+# copy to point at the newest one — see kg_validate.py's _update_latest_pointer.
+DEFAULT_REPORT = MAINTENANCE_DIR / "validation_report_latest.csv"
 DEFAULT_LOG = MAINTENANCE_DIR / "remediation_log.csv"
 TTL_PATH = ROOT / "data" / "mse_kg_full.ttl"
 
@@ -55,7 +65,38 @@ def load_report(path: Path = DEFAULT_REPORT) -> pd.DataFrame:
         raise FileNotFoundError(
             f"No report at {path}. Run `python -m utils.kg_validate` first."
         )
-    return pd.read_csv(path)
+    return read_csv_safe(path)
+
+
+def _check_report_matches_graph(report: pd.DataFrame, sample_size: int = 50):
+    """
+    Guard against acting on a stale report. If the report's IRIs aren't
+    present in the currently-loaded graph at all, every remove/purge in
+    remediate() silently matches zero triples while every patch's add()
+    still fires -- net effect: orphan nodes get created, nothing gets
+    fixed, and it looks like success. This happened once already: an
+    identity-key rebuild changed every IRI shape, a stale pre-rebuild
+    report was still on disk under the old fixed filename, and
+    --commit ran against it without any signal that anything was wrong.
+
+    Checks a sample rather than every row -- this only needs to catch
+    "the whole report is stale", not validate row-by-row.
+    """
+    if report.empty:
+        return
+    sample = report["iri"].dropna().unique()[:sample_size]
+    if len(sample) == 0:
+        return
+    present = sum(1 for iri in sample if (URIRef(iri), None, None) in g)
+    if present == 0:
+        raise RuntimeError(
+            f"None of {len(sample)} sampled IRIs from the report exist in "
+            f"the currently loaded graph ({len(g):,} triples). This report "
+            f"is almost certainly stale (produced against a different "
+            f"version of the graph, e.g. before an identity-key rebuild). "
+            f"Re-run `python -m utils.kg_validate` against the CURRENT "
+            f"graph before remediating. Refusing to proceed."
+        )
 
 
 def remediate(report: pd.DataFrame = None, dry_run: bool = True) -> dict:
@@ -66,6 +107,8 @@ def remediate(report: pd.DataFrame = None, dry_run: bool = True) -> dict:
     missing = required_cols - set(report.columns)
     if missing:
         raise ValueError(f"Report is missing expected column(s): {missing}")
+
+    _check_report_matches_graph(report)
 
     counts = {"patched": 0, "purged_materials": 0, "manual_review": 0}
     purged_iris = set()
@@ -93,6 +136,12 @@ def remediate(report: pd.DataFrame = None, dry_run: bool = True) -> dict:
     for _, row in recoverable.iterrows():
         if row["iri"] in purged_iris:
             continue  # already gone via a different unrecoverable field
+        # Guard: a blank csv_value here means the ground truth didn't
+        # survive the report round-trip. Refuse to write it.
+        if pd.isna(row["csv_value"]) or str(row["csv_value"]).strip() == "":
+            print(f"  SKIP {row['iri']} field={row['field']}: "
+                  f"csv_value is empty in the report — refusing to patch")
+            continue
         m = URIRef(row["iri"])
         prop = FIELD_PROP[row["field"]]
         dtype = FIELD_DATATYPE[row["field"]]
@@ -155,4 +204,4 @@ if __name__ == "__main__":
         else:
             print("Nothing changed — skipping serialization.")
     else:
-        print("\nDry run only — nothing written. Re-run with --commit to apply and save.")
+        print("\nDry run only — nothing written. Re-run with --commit to apply.")
