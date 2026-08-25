@@ -53,8 +53,8 @@ Raw Text / URL  →  LLM extraction  →  Deduplication & Sanitization  →  Typ
 
 | Interface | What | Latency |
 |---|---|---|
-| **[HF Space](https://huggingface.co/spaces/brainteaser/semantic-bg-query-semiconductor)** | Gradio, ZeroGPU, public | ~10–30 s end-to-end |
-| FastAPI (`POST /ask`) | Local, Tailscale-tunnelled | CPU-bound |
+| **[HF Space](https://huggingface.co/spaces/brainteaser/semantic-bg-query-semiconductor)** | Gradio, ZeroGPU, public | ~07–30 s end-to-end |
+| FastAPI (`POST /ask`) | Local, Tailscale-tunnelled | CPU-bound , 2.5 Minutes |
 | FastAPI (`GET /material`) | Direct rdflib index lookup, no LLM | instant |
 
 `parse-lora` is **not exposed publicly** — ingestion writes to the graph and stays author-gated.
